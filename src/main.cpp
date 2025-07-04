@@ -13,6 +13,12 @@ extern "C" {
 #include <time.h>
 #include <string.h>
 #include <stdio.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
+
+// ESP32-S3 internal temperature sensor header (guarded)
+// Removed unconditional #include <esp_temperature_sensor.h>.
 
 #define SCREEN_WIDTH 480
 #define SCREEN_HEIGHT 272
@@ -58,6 +64,19 @@ lv_obj_t *time_label_blr = nullptr;
 
 // Add global LVGL label for the date
 static lv_obj_t *date_label = nullptr;
+
+// Add global LVGL label for the temperature
+static lv_obj_t *temp_label = nullptr;
+
+// Shared time data and mutex
+typedef struct {
+    time_t utc;
+    struct tm t_london, t_ny, t_blr, t_phx, t_palo, t_chi;
+    char date_str[40];
+} SharedTimeData;
+
+static SharedTimeData g_time_data;
+static SemaphoreHandle_t g_time_mutex = nullptr;
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
     // Handle incoming MQTT messages if needed
@@ -261,7 +280,7 @@ void lvgl_init() {
 
 // Helper: Find last Sunday of a month
 int last_sunday(int year, int month) {
-    struct tm t = {0};
+    struct tm t = {};
     t.tm_year = year - 1900;
     t.tm_mon = month;
     t.tm_mday = 31;
@@ -275,7 +294,7 @@ int last_sunday(int year, int month) {
 
 // Helper: Find Nth Sunday of a month (n >= 1)
 int nth_sunday(int year, int month, int n) {
-    struct tm t = {0};
+    struct tm t = {};
     t.tm_year = year - 1900;
     t.tm_mon = month;
     t.tm_mday = 1;
@@ -291,7 +310,7 @@ bool is_dst_london(const struct tm* t) {
     int year = t->tm_year + 1900;
     int mon = t->tm_mon;
     int mday = t->tm_mday;
-    int wday = t->tm_wday;
+    // int wday = t->tm_wday; // unused
     if (mon < 2 || mon > 9) return false; // Jan, Feb, Nov, Dec: no DST
     if (mon > 2 && mon < 9) return true;  // Apr-Sep: DST
     if (mon == 2) { // March
@@ -316,7 +335,7 @@ bool is_dst_ny(const struct tm* t) {
     int year = t->tm_year + 1900;
     int mon = t->tm_mon;
     int mday = t->tm_mday;
-    int wday = t->tm_wday;
+    // int wday = t->tm_wday; // unused
     if (mon < 2 || mon > 10) return false; // Jan, Feb, Dec: no DST
     if (mon > 2 && mon < 10) return true;  // Apr-Oct: DST
     if (mon == 2) { // March
@@ -400,40 +419,22 @@ void get_city_times(time_t utc, struct tm* london, struct tm* ny, struct tm* blr
     *chi = t_chi;
 }
 
-extern "C" void app_main() {
-    // Arduino core setup
-    initArduino();
-    Serial.begin(115200);
-    Wire.begin(TOUCH_SDA, TOUCH_SCL); // Initialize I2C before using TouchLib
+// Network task for Core 1
+void network_task(void *param) {
     connectToWiFi();
     syncTime();
     connectToMQTT();
-    lvgl_init();
-    // Set black background
-    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
     unsigned long last_ntp_sync = millis();
     const unsigned long ntp_interval = 57UL * 60UL * 1000UL; // 57 minutes in ms
     while (1) {
-        static time_t last_time = 0;
         time_t now = time(nullptr);
-        if (now != last_time) {
-            last_time = now;
-            struct tm t_london, t_ny, t_blr, t_phx, t_palo, t_chi;
-            get_city_times(now, &t_london, &t_ny, &t_blr, &t_phx, &t_palo, &t_chi);
-            // Pad city names to align times
-            const char* city_names[] = {"London", "New York", "Bangalore", "Phoenix", "Palo Alto", "Chicago"};
-            char buf_london[40], buf_ny[40], buf_blr[40], buf_phx[40], buf_palo[40], buf_chi[40];
-            int pad = 11; // Longest city name + 1
-            snprintf(buf_london, sizeof(buf_london), "%-*s %02d:%02d:%02d", pad, city_names[0], t_london.tm_hour, t_london.tm_min, t_london.tm_sec);
-            snprintf(buf_ny, sizeof(buf_ny),     "%-*s %02d:%02d:%02d", pad, city_names[1], t_ny.tm_hour, t_ny.tm_min, t_ny.tm_sec);
-            snprintf(buf_blr, sizeof(buf_blr),   "%-*s %02d:%02d:%02d", pad, city_names[2], t_blr.tm_hour, t_blr.tm_min, t_blr.tm_sec);
-            snprintf(buf_phx, sizeof(buf_phx),   "%-*s %02d:%02d:%02d", pad, city_names[3], t_phx.tm_hour, t_phx.tm_min, t_phx.tm_sec);
-            snprintf(buf_palo, sizeof(buf_palo), "%-*s %02d:%02d:%02d", pad, city_names[4], t_palo.tm_hour, t_palo.tm_min, t_palo.tm_sec);
-            snprintf(buf_chi, sizeof(buf_chi),   "%-*s %02d:%02d:%02d", pad, city_names[5], t_chi.tm_hour, t_chi.tm_min, t_chi.tm_sec);
-            // Format date string from London time
-            char date_str[40];
-            strftime(date_str, sizeof(date_str), "%A, %d %B %Y", &t_london);
-            lvgl_show_times(buf_london, buf_ny, buf_blr, buf_phx, buf_palo, buf_chi, date_str);
+        SharedTimeData temp;
+        temp.utc = now;
+        get_city_times(now, &temp.t_london, &temp.t_ny, &temp.t_blr, &temp.t_phx, &temp.t_palo, &temp.t_chi);
+        strftime(temp.date_str, sizeof(temp.date_str), "%A, %d %B %Y", &temp.t_london);
+        if (g_time_mutex && xSemaphoreTake(g_time_mutex, pdMS_TO_TICKS(10))) {
+            g_time_data = temp;
+            xSemaphoreGive(g_time_mutex);
         }
         // NTP resync every 57 minutes
         if (millis() - last_ntp_sync > ntp_interval) {
@@ -441,7 +442,83 @@ extern "C" void app_main() {
             last_ntp_sync = millis();
         }
         mqttClient.loop();
+        vTaskDelay(pdMS_TO_TICKS(200)); // 200ms update
+    }
+}
+
+// Helper: Read ESP32 internal temperature sensor (returns Celsius)
+float read_internal_temperature() {
+#if defined(CONFIG_IDF_TARGET_ESP32S3) && __has_include(<esp_temperature_sensor.h>)
+    #include <esp_temperature_sensor.h>
+    float temp_c = 0.0f;
+    temperature_sensor_handle_t temp_sensor = NULL;
+    temperature_sensor_config_t temp_sensor_config = TEMPERATURE_SENSOR_CONFIG_DEFAULT();
+    temperature_sensor_install(&temp_sensor_config, &temp_sensor);
+    temperature_sensor_enable(temp_sensor);
+    temperature_sensor_get_celsius(temp_sensor, &temp_c);
+    temperature_sensor_disable(temp_sensor);
+    temperature_sensor_uninstall(temp_sensor);
+    return temp_c;
+#else
+    // Not supported, return dummy value
+    return 0.0f;
+#endif
+}
+
+// Show temperature on screen
+void lvgl_show_temperature(float temp_c) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.1f °C", temp_c); // Unicode degree symbol, UTF-8
+    if (!temp_label) {
+        temp_label = lv_label_create(lv_scr_act());
+        lv_obj_set_style_text_font(temp_label, &lv_font_montserrat_32, 0); // Use the nice font
+        lv_obj_set_style_text_color(temp_label, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_align(temp_label, LV_ALIGN_TOP_LEFT, 350, 150); // Move right by 50px
+    } else {
+        lv_obj_set_style_text_font(temp_label, &lv_font_montserrat_32, 0);
+        lv_obj_set_style_text_color(temp_label, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_align(temp_label, LV_ALIGN_TOP_LEFT, 350, 150);
+    }
+    lv_label_set_text(temp_label, buf);
+}
+
+extern "C" void app_main() {
+    // Arduino core setup
+    initArduino();
+    Serial.begin(115200);
+    Wire.begin(TOUCH_SDA, TOUCH_SCL); // Initialize I2C before using TouchLib
+    // Create mutex
+    g_time_mutex = xSemaphoreCreateMutex();
+    // Start network task on Core 1
+    xTaskCreatePinnedToCore(network_task, "network_task", 8192, NULL, 2, NULL, 1);
+    lvgl_init();
+    // Set black background
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
+    while (1) {
+        SharedTimeData local;
+        if (g_time_mutex && xSemaphoreTake(g_time_mutex, pdMS_TO_TICKS(10))) {
+            local = g_time_data;
+            xSemaphoreGive(g_time_mutex);
+        } else {
+            // If mutex not available, skip update
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        // Pad city names to align times
+        const char* city_names[] = {"London", "New York", "Bangalore", "Phoenix", "Palo Alto", "Chicago"};
+        char buf_london[40], buf_ny[40], buf_blr[40], buf_phx[40], buf_palo[40], buf_chi[40];
+        int pad = 11; // Longest city name + 1
+        snprintf(buf_london, sizeof(buf_london), "%-*s %02d:%02d:%02d", pad, city_names[0], local.t_london.tm_hour, local.t_london.tm_min, local.t_london.tm_sec);
+        snprintf(buf_ny, sizeof(buf_ny),     "%-*s %02d:%02d:%02d", pad, city_names[1], local.t_ny.tm_hour, local.t_ny.tm_min, local.t_ny.tm_sec);
+        snprintf(buf_blr, sizeof(buf_blr),   "%-*s %02d:%02d:%02d", pad, city_names[2], local.t_blr.tm_hour, local.t_blr.tm_min, local.t_blr.tm_sec);
+        snprintf(buf_phx, sizeof(buf_phx),   "%-*s %02d:%02d:%02d", pad, city_names[3], local.t_phx.tm_hour, local.t_phx.tm_min, local.t_phx.tm_sec);
+        snprintf(buf_palo, sizeof(buf_palo), "%-*s %02d:%02d:%02d", pad, city_names[4], local.t_palo.tm_hour, local.t_palo.tm_min, local.t_palo.tm_sec);
+        snprintf(buf_chi, sizeof(buf_chi),   "%-*s %02d:%02d:%02d", pad, city_names[5], local.t_chi.tm_hour, local.t_chi.tm_min, local.t_chi.tm_sec);
+        lvgl_show_times(buf_london, buf_ny, buf_blr, buf_phx, buf_palo, buf_chi, local.date_str);
+        // Show temperature
+        float temp_c = read_internal_temperature();
+        lvgl_show_temperature(temp_c);
         lv_timer_handler();
-        delay(10);
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
