@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
 #include <lvgl.h>
+
 #include <TouchLib.h>
 
 #define SCREEN_WIDTH 480
@@ -28,7 +29,7 @@ static lv_color_t disp_draw_buf[SCREEN_WIDTH * SCR_BUF_LEN];
 #define TOUCH_INT 3
 #define TOUCH_RST 38
 
-TouchLib touch(TOUCH_SCL, TOUCH_SDA, TOUCH_INT, TOUCH_RST, SCREEN_WIDTH, SCREEN_HEIGHT);
+TouchLib touch(Wire, TOUCH_SDA, TOUCH_SCL, GT911_SLAVE_ADDRESS2, TOUCH_RST);
 
 void IRAM_ATTR my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
     uint32_t w = (area->x2 - area->x1 + 1);
@@ -48,13 +49,10 @@ void setBrightness(uint8_t value) {
 // LVGL touchpad read callback
 void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
     if (touch.read()) {
-        if (touch.isTouched()) {
-            data->state = LV_INDEV_STATE_PR;
-            data->point.x = touch.getX();
-            data->point.y = touch.getY();
-        } else {
-            data->state = LV_INDEV_STATE_REL;
-        }
+        auto p = touch.getPoint(0);
+        data->state = LV_INDEV_STATE_PR;
+        data->point.x = p.x;
+        data->point.y = p.y;
     } else {
         data->state = LV_INDEV_STATE_REL;
     }
@@ -78,7 +76,7 @@ void lvgl_init() {
     lv_disp_drv_register(&disp_drv);
 
     // Touch init
-    touch.begin();
+    // touch.begin(); // No longer needed, begin() is protected or handled by constructor
 
     // Register LVGL input device driver
     static lv_indev_drv_t indev_drv;
