@@ -53,6 +53,7 @@ TouchLib touch(Wire, TOUCH_SDA, TOUCH_SCL, GT911_SLAVE_ADDRESS1, TOUCH_RST);
 #define MQTT_TOPIC "cmnd/ESP32S3-LCD/temperature"
 #define MQTT_TOPIC_C "cmnd/ESP32S3-LCD/TemperatureC"
 #define MQTT_TOPIC_P "cmnd/ESP32S3-LCD/Pressure"
+#define MQTT_TOPIC_H "cmnd/ESP32S3-LCD/Humidity"
 #define NTP_SERVER "pool.ntp.org"
 
 // MQTT setup
@@ -71,6 +72,7 @@ static lv_obj_t *date_label = nullptr;
 static lv_obj_t *temp_label = nullptr;
 static lv_obj_t *temp_label_c = nullptr; // New label for Celsius
 static lv_obj_t *pressure_label = nullptr; // Label for pressure
+static lv_obj_t *humidity_label = nullptr; // Label for humidity
 
 // Shared time data and mutex
 typedef struct {
@@ -86,10 +88,11 @@ static SemaphoreHandle_t g_time_mutex = nullptr;
 static float mqtt_override_temp = NAN;
 static float mqtt_override_temp_c = NAN; // New global for Celsius
 static float mqtt_override_pressure = NAN; // New global for pressure
+static float mqtt_override_humidity = NAN; // New global for humidity
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
     // Handle incoming MQTT messages for temperature override
-    if ((strcmp(topic, MQTT_TOPIC) == 0 || strcmp(topic, MQTT_TOPIC_C) == 0 || strcmp(topic, MQTT_TOPIC_P) == 0) && length > 0) {
+    if ((strcmp(topic, MQTT_TOPIC) == 0 || strcmp(topic, MQTT_TOPIC_C) == 0 || strcmp(topic, MQTT_TOPIC_P) == 0 || strcmp(topic, MQTT_TOPIC_H) == 0) && length > 0) {
         char temp_str[32];
         size_t copy_len = (length < sizeof(temp_str)-1) ? length : sizeof(temp_str)-1;
         memcpy(temp_str, payload, copy_len);
@@ -101,6 +104,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
             mqtt_override_temp_c = val;
         } else if (strcmp(topic, MQTT_TOPIC_P) == 0) {
             mqtt_override_pressure = val;
+        } else if (strcmp(topic, MQTT_TOPIC_H) == 0) {
+            mqtt_override_humidity = val;
         }
     }
 }
@@ -125,6 +130,7 @@ void connectToMQTT() {
             mqttClient.subscribe(MQTT_TOPIC);
             mqttClient.subscribe(MQTT_TOPIC_C); // Subscribe to Celsius topic
             mqttClient.subscribe(MQTT_TOPIC_P); // Subscribe to Pressure topic
+            mqttClient.subscribe(MQTT_TOPIC_H); // Subscribe to Humidity topic
         } else {
             Serial.print("failed, rc=");
             Serial.print(mqttClient.state());
@@ -592,6 +598,40 @@ void lvgl_show_temperature(float temp_c) {
         lv_obj_align_to(label_p, pressure_label, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
     }
     lv_label_set_text(label_p, "hPa");
+
+    // Show humidity value below pressure, left aligned, with '%hm' label
+    char buf_h[32];
+    float display_humidity = mqtt_override_humidity;
+    if (!isnan(display_humidity)) {
+        snprintf(buf_h, sizeof(buf_h), "%.1f", display_humidity);
+    } else {
+        snprintf(buf_h, sizeof(buf_h), "--");
+    }
+    if (!humidity_label) {
+        humidity_label = lv_label_create(lv_scr_act());
+        lv_obj_set_style_text_font(humidity_label, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(humidity_label, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_align(humidity_label, LV_ALIGN_TOP_LEFT, 350, 160); // 30px below pressure
+    } else {
+        lv_obj_set_style_text_font(humidity_label, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(humidity_label, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_align(humidity_label, LV_ALIGN_TOP_LEFT, 350, 160);
+    }
+    lv_label_set_text(humidity_label, buf_h);
+
+    // Add the '%hm' label next to the humidity value
+    static lv_obj_t *label_h = nullptr;
+    if (!label_h) {
+        label_h = lv_label_create(lv_scr_act());
+        lv_obj_set_style_text_font(label_h, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(label_h, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_align_to(label_h, humidity_label, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+    } else {
+        lv_obj_set_style_text_font(label_h, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(label_h, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_align_to(label_h, humidity_label, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+    }
+    lv_label_set_text(label_h, "%hm");
 }
 
 extern "C" void app_main() {
