@@ -671,6 +671,6 @@ extern "C" void app_main() {
         float temp_c = read_internal_temperature();
         lvgl_show_temperature(temp_c);
         lv_timer_handler();
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(250)); // Increased delay for lower CPU usage
     }
 }
