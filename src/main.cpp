@@ -50,7 +50,9 @@ TouchLib touch(Wire, TOUCH_SDA, TOUCH_SCL, GT911_SLAVE_ADDRESS1, TOUCH_RST);
 #define WIFI_SSID "TP-Link_CB58"
 #define WIFI_PASS "13157005"
 #define MQTT_BROKER "192.168.100.232"
-#define MQTT_TOPIC "esp32s3-1/tele"
+#define MQTT_TOPIC "cmnd/ESP32S3-LCD/temperature"
+#define MQTT_TOPIC_C "cmnd/ESP32S3-LCD/TemperatureC"
+#define MQTT_TOPIC_P "cmnd/ESP32S3-LCD/Pressure"
 #define NTP_SERVER "pool.ntp.org"
 
 // MQTT setup
@@ -67,6 +69,8 @@ static lv_obj_t *date_label = nullptr;
 
 // Add global LVGL label for the temperature
 static lv_obj_t *temp_label = nullptr;
+static lv_obj_t *temp_label_c = nullptr; // New label for Celsius
+static lv_obj_t *pressure_label = nullptr; // Label for pressure
 
 // Shared time data and mutex
 typedef struct {
@@ -78,8 +82,27 @@ typedef struct {
 static SharedTimeData g_time_data;
 static SemaphoreHandle_t g_time_mutex = nullptr;
 
+// Add global for MQTT override temperature
+static float mqtt_override_temp = NAN;
+static float mqtt_override_temp_c = NAN; // New global for Celsius
+static float mqtt_override_pressure = NAN; // New global for pressure
+
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-    // Handle incoming MQTT messages if needed
+    // Handle incoming MQTT messages for temperature override
+    if ((strcmp(topic, MQTT_TOPIC) == 0 || strcmp(topic, MQTT_TOPIC_C) == 0 || strcmp(topic, MQTT_TOPIC_P) == 0) && length > 0) {
+        char temp_str[32];
+        size_t copy_len = (length < sizeof(temp_str)-1) ? length : sizeof(temp_str)-1;
+        memcpy(temp_str, payload, copy_len);
+        temp_str[copy_len] = '\0';
+        float val = atof(temp_str);
+        if (strcmp(topic, MQTT_TOPIC) == 0) {
+            mqtt_override_temp = val;
+        } else if (strcmp(topic, MQTT_TOPIC_C) == 0) {
+            mqtt_override_temp_c = val;
+        } else if (strcmp(topic, MQTT_TOPIC_P) == 0) {
+            mqtt_override_pressure = val;
+        }
+    }
 }
 
 void connectToWiFi() {
@@ -100,6 +123,8 @@ void connectToMQTT() {
         if (mqttClient.connect("esp32s3-1")) {
             Serial.println("connected");
             mqttClient.subscribe(MQTT_TOPIC);
+            mqttClient.subscribe(MQTT_TOPIC_C); // Subscribe to Celsius topic
+            mqttClient.subscribe(MQTT_TOPIC_P); // Subscribe to Pressure topic
         } else {
             Serial.print("failed, rc=");
             Serial.print(mqttClient.state());
@@ -468,18 +493,105 @@ float read_internal_temperature() {
 // Show temperature on screen
 void lvgl_show_temperature(float temp_c) {
     char buf[32];
-    snprintf(buf, sizeof(buf), "%.1f °C", temp_c); // Unicode degree symbol, UTF-8
+    // Always use the correct source for Fahrenheit: if MQTT override for F is set, use it; else if C is set, convert; else use temp_c
+    float display_temp;
+    if (!isnan(mqtt_override_temp)) {
+        display_temp = mqtt_override_temp;
+    } else if (!isnan(mqtt_override_temp_c)) {
+        display_temp = mqtt_override_temp_c * 9.0f / 5.0f + 32.0f;
+    } else {
+        display_temp = temp_c * 9.0f / 5.0f + 32.0f;
+    }
+    snprintf(buf, sizeof(buf), "%.1f", display_temp);
     if (!temp_label) {
         temp_label = lv_label_create(lv_scr_act());
-        lv_obj_set_style_text_font(temp_label, &lv_font_montserrat_32, 0); // Use the nice font
+        lv_obj_set_style_text_font(temp_label, &lv_font_montserrat_24, 0);
         lv_obj_set_style_text_color(temp_label, lv_palette_main(LV_PALETTE_RED), 0);
-        lv_obj_align(temp_label, LV_ALIGN_TOP_LEFT, 350, 150); // Move right by 50px
+        lv_obj_align(temp_label, LV_ALIGN_TOP_LEFT, 350, 70);
     } else {
-        lv_obj_set_style_text_font(temp_label, &lv_font_montserrat_32, 0);
+        lv_obj_set_style_text_font(temp_label, &lv_font_montserrat_24, 0);
         lv_obj_set_style_text_color(temp_label, lv_palette_main(LV_PALETTE_RED), 0);
-        lv_obj_align(temp_label, LV_ALIGN_TOP_LEFT, 350, 150);
+        lv_obj_align(temp_label, LV_ALIGN_TOP_LEFT, 350, 70);
     }
     lv_label_set_text(temp_label, buf);
+
+    // Add the '°F' label next to the Fahrenheit value
+    static lv_obj_t *label_f = nullptr;
+    if (!label_f) {
+        label_f = lv_label_create(lv_scr_act());
+        lv_obj_set_style_text_font(label_f, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(label_f, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_align_to(label_f, temp_label, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+    } else {
+        lv_obj_set_style_text_font(label_f, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(label_f, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_align_to(label_f, temp_label, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+    }
+    lv_label_set_text(label_f, "°F");
+
+    // Show Celsius value below, left aligned, with '°C' label
+    char buf_c[32];
+    float display_temp_c = !isnan(mqtt_override_temp_c) ? mqtt_override_temp_c : (isnan(mqtt_override_temp) ? temp_c : (mqtt_override_temp - 32.0f) * 5.0f/9.0f);
+    snprintf(buf_c, sizeof(buf_c), "%.1f", display_temp_c);
+    if (!temp_label_c) {
+        temp_label_c = lv_label_create(lv_scr_act());
+        lv_obj_set_style_text_font(temp_label_c, &lv_font_montserrat_24, 0); // Now 24px
+        lv_obj_set_style_text_color(temp_label_c, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_align(temp_label_c, LV_ALIGN_TOP_LEFT, 350, 100); // 30px below F
+    } else {
+        lv_obj_set_style_text_font(temp_label_c, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(temp_label_c, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_align(temp_label_c, LV_ALIGN_TOP_LEFT, 350, 100);
+    }
+    lv_label_set_text(temp_label_c, buf_c);
+
+    // Add the '°C' label next to the Celsius value
+    static lv_obj_t *label_c = nullptr;
+    if (!label_c) {
+        label_c = lv_label_create(lv_scr_act());
+        lv_obj_set_style_text_font(label_c, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(label_c, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_align_to(label_c, temp_label_c, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+    } else {
+        lv_obj_set_style_text_font(label_c, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(label_c, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_align_to(label_c, temp_label_c, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+    }
+    lv_label_set_text(label_c, "°C");
+
+    // Show pressure value below Celsius, left aligned, with 'hPa' label
+    char buf_p[32];
+    float display_pressure = mqtt_override_pressure;
+    if (!isnan(display_pressure)) {
+        snprintf(buf_p, sizeof(buf_p), "%.1f", display_pressure);
+    } else {
+        snprintf(buf_p, sizeof(buf_p), "--");
+    }
+    if (!pressure_label) {
+        pressure_label = lv_label_create(lv_scr_act());
+        lv_obj_set_style_text_font(pressure_label, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(pressure_label, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_align(pressure_label, LV_ALIGN_TOP_LEFT, 350, 130); // 30px below C
+    } else {
+        lv_obj_set_style_text_font(pressure_label, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(pressure_label, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_align(pressure_label, LV_ALIGN_TOP_LEFT, 350, 130);
+    }
+    lv_label_set_text(pressure_label, buf_p);
+
+    // Add the 'hPa' label next to the pressure value
+    static lv_obj_t *label_p = nullptr;
+    if (!label_p) {
+        label_p = lv_label_create(lv_scr_act());
+        lv_obj_set_style_text_font(label_p, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(label_p, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_align_to(label_p, pressure_label, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+    } else {
+        lv_obj_set_style_text_font(label_p, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(label_p, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_align_to(label_p, pressure_label, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+    }
+    lv_label_set_text(label_p, "hPa");
 }
 
 extern "C" void app_main() {
