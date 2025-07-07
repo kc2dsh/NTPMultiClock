@@ -91,6 +91,15 @@ static float mqtt_override_pressure = NAN; // New global for pressure
 static float mqtt_override_humidity = NAN; // New global for humidity
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
+    // Debug: Print incoming MQTT message
+    Serial.print("[MQTT] Topic: ");
+    Serial.print(topic);
+    Serial.print(" | Payload: ");
+    for (unsigned int i = 0; i < length; ++i) {
+        Serial.print((char)payload[i]);
+    }
+    Serial.print(" | Length: ");
+    Serial.println(length);
     // Handle incoming MQTT messages for temperature override
     if ((strcmp(topic, MQTT_TOPIC) == 0 || strcmp(topic, MQTT_TOPIC_C) == 0 || strcmp(topic, MQTT_TOPIC_P) == 0 || strcmp(topic, MQTT_TOPIC_H) == 0) && length > 0) {
         char temp_str[32];
@@ -470,6 +479,10 @@ void network_task(void *param) {
         if (millis() - last_ntp_sync > ntp_interval) {
             syncTime();
             last_ntp_sync = millis();
+        }
+        // Reconnect to MQTT if disconnected
+        if (!mqttClient.connected()) {
+            connectToMQTT();
         }
         mqttClient.loop();
         vTaskDelay(pdMS_TO_TICKS(200)); // 200ms update
