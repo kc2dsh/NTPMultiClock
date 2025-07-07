@@ -50,7 +50,7 @@ TouchLib touch(Wire, TOUCH_SDA, TOUCH_SCL, GT911_SLAVE_ADDRESS1, TOUCH_RST);
 #define WIFI_SSID "TP-Link_CB58"
 #define WIFI_PASS "13157005"
 #define MQTT_BROKER "192.168.100.232"
-#define MQTT_TOPIC "cmnd/ESP32S3-LCD/temperature"
+#define MQTT_TOPIC "cmnd/ESP32S3-LCD/Temperature"
 #define MQTT_TOPIC_C "cmnd/ESP32S3-LCD/TemperatureC"
 #define MQTT_TOPIC_P "cmnd/ESP32S3-LCD/Pressure"
 #define MQTT_TOPIC_H "cmnd/ESP32S3-LCD/Humidity"
@@ -115,26 +115,26 @@ void connectToWiFi() {
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     while (WiFi.status() != WL_CONNECTED) {
         delay(500);
-        Serial.print(".");
+        // Serial.print("."); // Removed debug
     }
-    Serial.println("\nWiFi connected");
+    // Serial.println("\nWiFi connected"); // Removed debug
 }
 
 void connectToMQTT() {
     mqttClient.setServer(MQTT_BROKER, 1883);
     mqttClient.setCallback(mqttCallback);
     while (!mqttClient.connected()) {
-        Serial.print("Connecting to MQTT...");
+        // Serial.print("Connecting to MQTT..."); // Removed debug
         if (mqttClient.connect("esp32s3-1")) {
-            Serial.println("connected");
+            // Serial.println("connected"); // Removed debug
             mqttClient.subscribe(MQTT_TOPIC);
             mqttClient.subscribe(MQTT_TOPIC_C); // Subscribe to Celsius topic
             mqttClient.subscribe(MQTT_TOPIC_P); // Subscribe to Pressure topic
             mqttClient.subscribe(MQTT_TOPIC_H); // Subscribe to Humidity topic
         } else {
-            Serial.print("failed, rc=");
-            Serial.print(mqttClient.state());
-            Serial.println(" try again in 2 seconds");
+            // Serial.print("failed, rc="); // Removed debug
+            // Serial.print(mqttClient.state()); // Removed debug
+            // Serial.println(" try again in 2 seconds"); // Removed debug
             delay(2000);
         }
     }
@@ -144,9 +144,9 @@ void syncTime() {
     configTime(0, 0, NTP_SERVER);
     while (time(nullptr) < 100000) {
         delay(500);
-        Serial.print("*");
+        // Serial.print("*"); // Removed debug
     }
-    Serial.println("\nTime synced");
+    // Serial.println("\nTime synced"); // Removed debug
 }
 
 void lvgl_show_time(const char* timestr) {
@@ -254,7 +254,7 @@ static lv_obj_t *touch_label = nullptr;
 void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
     if (touch.read()) {
         auto p = touch.getPoint(0);
-        Serial.printf("Touch at: %d, %d\n", p.x, p.y);
+        // Serial.printf("Touch at: %d, %d\n", p.x, p.y); // Removed debug
         data->state = LV_INDEV_STATE_PR;
         data->point.x = p.x;
         data->point.y = p.y;
@@ -266,7 +266,6 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
             // lv_obj_align(touch_label, LV_ALIGN_TOP_MID, 0, 0);
         }
     } else {
-        Serial.println("No touch detected");
         data->state = LV_INDEV_STATE_REL;
         // Optionally clear the label when not touching
         if (touch_label) {
@@ -634,6 +633,11 @@ void lvgl_show_temperature(float temp_c) {
     lv_label_set_text(label_h, "%hm");
 }
 
+// Definition for set_mqtt_overrides_for_display to resolve linker error
+void set_mqtt_overrides_for_display(float temp, float temp_c, float pressure, float humidity) {
+    // This function is currently a placeholder. Implement logic if needed.
+}
+
 extern "C" void app_main() {
     // Arduino core setup
     initArduino();
@@ -648,8 +652,13 @@ extern "C" void app_main() {
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
     while (1) {
         SharedTimeData local;
+        float temp_override, temp_c_override, pressure_override, humidity_override;
         if (g_time_mutex && xSemaphoreTake(g_time_mutex, pdMS_TO_TICKS(10))) {
             local = g_time_data;
+            temp_override = mqtt_override_temp;
+            temp_c_override = mqtt_override_temp_c;
+            pressure_override = mqtt_override_pressure;
+            humidity_override = mqtt_override_humidity;
             xSemaphoreGive(g_time_mutex);
         } else {
             // If mutex not available, skip update
@@ -669,6 +678,8 @@ extern "C" void app_main() {
         lvgl_show_times(buf_london, buf_ny, buf_blr, buf_phx, buf_palo, buf_chi, local.date_str);
         // Show temperature
         float temp_c = read_internal_temperature();
+        // Use the local copies of the override values
+        set_mqtt_overrides_for_display(temp_override, temp_c_override, pressure_override, humidity_override);
         lvgl_show_temperature(temp_c);
         lv_timer_handler();
         vTaskDelay(pdMS_TO_TICKS(250)); // Increased delay for lower CPU usage
